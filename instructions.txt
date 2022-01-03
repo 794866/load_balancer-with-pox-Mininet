@@ -1,0 +1,7 @@
+Step 1: Code load_balancer.py in path /pox/ext and UP the controller with the next command
+cd ~/ && cd pox && python pox.py log.level --DEBUG load\_balancer
+
+Step 2: Start the topology.py script and make ping from client host to server host
+
+Observe waht result return the statistic.
+
