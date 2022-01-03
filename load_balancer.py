@@ -53,14 +53,6 @@ class load_balancer (object):
 		log.debug("Connection %s" % event.connection)
     		LoadBalancer(event.connection)
 
-	"""
-	Connection from switch closed
-	"""
-	def _handle_ConnectionDown (self, event):
-		log.debug("Switch disconnected" % ())
-		# Stop stats req timer
-		stop_flag.set()
-
 class proxy_load_balancer (object):
 	"""
 		ALL PROXY CLASS
