@@ -1,198 +1,215 @@
-from pox.core import core    # the POX core object
-import pox.openflow.libopenflow_01 as of
-from pox.lib.revent import *    # event system
-from pox.lib.util import dpidToStr
-from pox.lib.packet.ethernet import ethernet    # handle ethernet
-from pox.lib.packet.arp import arp    # handle arp
-from pox.lib.addresses import IPAddr    # ip address
-from pox.lib.addresses import EthAddr    # ethernet address
 import time
 
+from pox.core import core
+import pox.lib.packet as libpacket
+from pox.lib.packet.ethernet import ethernet
+from pox.lib.packet.arp import arp
+from pox.lib.addresses import IPAddr, EthAddr
+import pox.openflow.libopenflow_01 as of
+from pox.openflow.of_json import *
+import random
+import threading
+
 log = core.getLogger()
-IDLE_TIMEOUT = 10    #Seconds
 
-"""
-SWITCH ADDRESSES
-"""
-LOAD_BALANCER_IP = IPAddr('10.0.0.13')
-LOAD_BALANCER_MAC = EthAddr('00:00:00:00:00:13')
+IDLE_TIMEOUT = 10   # SECONDS
 
-def get_host_by_mac (hosts_list, mac):
-	return next( (x for x in hosts_list.values() if str(x.mac) == str(mac)), None)
+""" SWITCH ADDRESSES """
+NET_PROXY_IP = IPAddr('10.0.0.13')
+NET_PROXY_MAC = EthAddr('00:00:00:00:00:13')
 
-"""
-Gets a host by its ip
-"""
-def get_host_by_ip (hosts_list, ip):
-	return next( (x for x in hosts_list.values() if str(x.ip) == str(ip)), None)
+""" Gets host by mac """
+def map_list_mac(list, mac):
+    return next((x for x in list.values() if str(x.mac) == str(mac)), None)
 
-class balancer (object):
-    class Server:
-        log.debug("Init Class Server")
-        def __init__ (self, ip, mac, port):
-            self.ip = IPAddr(ip)    # set the ip address
-            self.mac = EthAddr(mac)    # set the mac address
+""" Gets host by IP """
+def map_list_ip(list, ip):
+    return next((x for x in list.values() if str(x.ip) == str(ip)), None)
+
+class proxy_controller(object):
+    class Host(object):
+        def __init__(self, mac, ip, port):
+            self.mac = mac
+            self.ip = ip
             self.port = port
+        def __str__(self):
+            return "MAC: " + str(self.mac) + " | IP: " + str(self.ip) + " | Port:" + str(self.port)
+    """Statistic packets """
+    class stats_request(threading.Thread):
+        def __init__(self, connection):
+            threading.Thread.__init__(self)
+            self.connection = connection
 
-            def __str__(self):
-                return','.join([str(self.ip), str(self.mac), str(self.port)])
+        def run(self):
+            while True:
+                msg = of.ofp_stats_request()
+                msg.type = of.OFPST_PORT
+                msg.body = of.ofp_port_stats_request()
+                self.connection.send(msg)
+                time.sleep(5)
 
-    def __init__ (self, connection):
+    """ INITIALIZATION PROXY """
+    def __init__(self, connection):
         self.connection = connection
-        #self.listenTo(connection)
+        self.selectedMehod = 0
+
+        # Timer should be global in order to be stopped when ConnectionDown event is raised
+        self.stats_request(self.connection).start()
+
+        """ FROM CLIENTS AND SERVERS ADDRESSES """
+        self.MAP_CLIENT = {}
+        self.MAP_CLIENT[0] = self.Host('00:00:00:00:00:01', '10.0.0.1', 1)
+        self.MAP_CLIENT[1] = self.Host('00:00:00:00:00:02', '10.0.0.2', 2)
+        self.MAP_CLIENT[2] = self.Host('00:00:00:00:00:03', '10.0.0.3', 3)
+        self.MAP_CLIENT[3] = self.Host('00:00:00:00:00:04', '10.0.0.4', 4)
+        self.MAP_CLIENT[4] = self.Host('00:00:00:00:00:05', '10.0.0.5', 5)
+        self.MAP_CLIENT[5] = self.Host('00:00:00:00:00:06', '10.0.0.6', 6)
+
+        self.MAP_SERVER = {}
+        self.MAP_SERVER[0] = self.Host('00:00:00:00:00:07', '10.0.0.7', 7)
+        self.MAP_SERVER[1] = self.Host('00:00:00:00:00:08', '10.0.0.8', 8)
+        self.MAP_SERVER[2] = self.Host('00:00:00:00:00:09', '10.0.0.9', 9)
+        self.MAP_SERVER[3] = self.Host('00:00:00:00:00:10', '10.0.0.10', 10)
+        self.MAP_SERVER[4] = self.Host('00:00:00:00:00:11', '10.0.0.11', 11)
+        self.MAP_SERVER[5] = self.Host('00:00:00:00:00:12', '10.0.0.12', 12)
+        self.getServer = 0
+
+
+        # Listen to the connection
         connection.addListeners(self)
 
-        # Initialize the server list
-        self.clients = [
-            self.Server('10.0.0.1', '00:00:00:00:00:01', 1),
-            self.Server('10.0.0.2', '00:00:00:00:00:02', 2),
-            self.Server('10.0.0.3', '00:00:00:00:00:03', 3),
-            self.Server('10.0.0.4', '00:00:00:00:00:04', 4),
-            self.Server('10.0.0.5', '00:00:00:00:00:05', 5),
-            self.Server('10.0.0.6', '00:00:00:00:00:06', 6),
-        ]
-
-        # Initialize the server list
-        self.servers = [
-            self.Server('10.0.0.7', '00:00:00:00:00:07', 7),
-            self.Server('10.0.0.8', '00:00:00:00:00:08', 8),
-            self.Server('10.0.0.9', '00:00:00:00:00:09', 9),
-            self.Server('10.0.0.10', '00:00:00:00:00:10', 10),
-            self.Server('10.0.0.11', '00:00:00:00:00:11', 11),
-            self.Server('10.0.0.12', '00:00:00:00:00:12', 12),
-        ]
-        self.last_server = 0
-
     def _handle_PortStatsReceived(self, event):
-        log.info("Stats received: %s" % (str(flow_stats_to_list(event.stats))))
+        log.info("Statistics: %s" % (str(flow_stats_to_list(event.stats))))
 
     def _handle_PacketIn(self, event):
-        frame = event.parse()
+        """ Handles packet in messages from the switch """
+        packet = event.parse() # This is the parsed packet data.
+        if packet.type == packet.ARP_TYPE:    # ARP request
+            log.debug("Handling ARP Request")
+            self.handle_ARP_request(packet, event)
 
-        # ARP request
-        if frame.type == frame.ARP_TYPE:
-            log.debug("Handling ARP Request from %s" % (frame.next.protosrc))
-            self.handler_arp(frame, event)
-        # Service request
-        elif frame.type == frame.IP_TYPE:
-            log.debug("Handling Service request from %s" % (frame.next.srcip))
-            self.handler_service(frame, event)
+        elif packet.type == packet.IP_TYPE:   # Service request
+            log.debug("Handling Request Service")
+            self.handle_IP_request(packet, event)
 
-    def get_next_server(self):
-        # Round-robin load the servers
-        self.last_server = (self.last_server + 1) % len(self.servers)
-        return self.servers[self.last_server]
+    def handle_ARP_request(self, packet, event):
+        #Get ARP request from packet
+        arp_request = packet.next
+        # Build Ethernet ARP packet
+        ethernet_packet = ethernet()
+        ethernet_packet.type = ethernet.ARP_TYPE
+        ethernet_packet.dst = packet.src
 
-    """
-    An ARP reply with switch fake MAC has to be sent
-    """
+        ethernet_packet.src = NET_PROXY_MAC # Change ARP source to NETWORK_PROXY_MAC
+        #We'r Mapping the source packet
+        packet_from_client = False if map_list_mac(self.MAP_CLIENT, packet.src) is None else True
 
-    def handler_arp (self, frame, event):
-        eth_reply_msg = ethernet()
-        eth_reply_msg.type = ethernet.ARP_TYPE
-        eth_reply_msg.dst = frame.src
-        # Switch fake MAC
-        eth_reply_msg.src = LOAD_BALANCER_MAC
+        #Create an ARP reply with NET_PROXY_MAC
+        arp_reply = arp()
+        arp_reply.opcode = arp.REPLY
+        arp_reply.hwsrc = NET_PROXY_MAC
+        arp_reply.hwdst = arp_request.hwsrc
+        if packet_from_client == True:
+            arp_reply.protosrc = NET_PROXY_IP # Set PROXY IP if is CLient source and server IP otherwise
+        else:
+            arp_reply.protosrc = arp_request.protodst
+        arp_reply.protodst = arp_request.protosrc
 
-        arp_request_msg = frame.next
+        # ARP Reply is the packet payload
+        ethernet_packet.set_payload(arp_reply)
 
-        arp_reply_msg = arp()
-        arp_reply_msg.opcode = arp.REPLY
-        # Switch fake MAC
-        arp_reply_msg.hwsrc = LOAD_BALANCER_MAC
-        arp_reply_msg.hwdst = arp_request_msg.hwsrc
-        # Transparent proxy IP
-        arp_reply_msg.protosrc = LOAD_BALANCER_IP
-
-        # Encapsulate
-        eth_reply_msg.set_payload(arp_reply_msg)
-
-        # Send OF msg to output ARP packet
+        # Send the ARP Reply packet
         msg = of.ofp_packet_out()
-        msg.data = eth_reply_msg.pack()
+        msg.data = ethernet_packet.pack()
         msg.actions.append(of.ofp_action_output(port=of.OFPP_IN_PORT))
         msg.in_port = event.port
-        log.debug("Sending OFP ARP Packet Out" % ())
-
-        log.info("msg ->")
-        log.info(msg)
-
+        log.debug("Sending ARP Reply packet")
         self.connection.send(msg)
 
+    """ RoundRobbin Method to select new random server """
+    def getNewServer(self):
+        if self.selectedMehod == 0: #Selected round robbin or otherwise random method
+            self.getServer = (self.getServer + 1) % len(self.MAP_SERVER)
+            return self.MAP_SERVER[self.getServer]
+        else:
+            return random.choice(self.MAP_SERVER)
 
-    def handler_service(self, frame, event):
-        server = self.get_next_server()
+    def handle_IP_request(self, frame, event):
+        """ Reply to the Pings """
         packet = frame.next
 
-        # Server -> Client path
+        """ Verify ICMP Reply packet """
+        def icmp_reply(frame):
+            if map_list_mac(self.MAP_SERVER, frame.src) is None:
+                return False
+            return True
+
+        # Send any ICMP reply
+        if icmp_reply(frame) == True:
+            msg = of.ofp_packet_out()
+            msg_dst = map_list_ip(self.MAP_CLIENT, packet.dstip)
+            frame.src = NET_PROXY_MAC
+            frame.dst = msg_dst.mac
+            frame.next.srcip = NET_PROXY_IP
+            msg.actions.append(of.ofp_action_output(port=msg_dst.port))
+            msg.in_port = event.port
+            log.debug("Sending any ICMP Packet Reply")
+            self.connection.send(msg)
+            return None
+
+        server = self.getNewServer()
+
+        #Match Rule from Server to Client
         msg = of.ofp_flow_mod()
         msg.idle_timeout = IDLE_TIMEOUT
         msg.hard_timeout = IDLE_TIMEOUT
-        # Packets coming from the chosen server
         msg.match.in_port = server.port
-        # Rule only for IP packets (service)
         msg.match.dl_type = ethernet.IP_TYPE
-        # Ethernet src address matching the MAC of the chosen server
         msg.match.dl_src = server.mac
-        # Ethernet dst address matching the Switch fake MAC
-        msg.match.dl_dst = LOAD_BALANCER_MAC
-        # Network src address matching the IP of the chosen server
+        msg.match.dl_dst = NET_PROXY_MAC
         msg.match.nw_src = server.ip
-        # Network dst address matching the IP of the client
         msg.match.nw_dst = packet.srcip
 
-        log.debug("Chosen server for %s is %s" % (packet.srcip, server.ip))
+        log.debug("Selected Server from the Client %s -> %s" % (packet.srcip, server.ip))
 
-        #UPDATE IP AND MAC FROM LOADBALANCER.IP AND .MAC
-        msg.actions.append(of.ofp_action_nw_addr.set_src(LOAD_BALANCER_IP))
-        msg.actions.append(of.ofp_action_dl_addr.set_src(LOAD_BALANCER_MAC))
+        # Update IP & MAC Network Proxy if theres a match
+        msg.actions.append(of.ofp_action_dl_addr.set_src(NET_PROXY_MAC))
         msg.actions.append(of.ofp_action_dl_addr.set_dst(frame.src))
-
-        # - Forward to the client
+        msg.actions.append(of.ofp_action_nw_addr.set_src(NET_PROXY_IP))
         msg.actions.append(of.ofp_action_output(port=event.port))
-        # Send OF msg to update flow rules
-        log.debug("Sending OFP FlowMod Server -> Client path" % ())
+        log.debug("Sending ICMP reply Server to Client ")
         self.connection.send(msg)
 
-        # Client -> Server path
+        #Match Rule from Client to Server
         msg = of.ofp_flow_mod()
         msg.idle_timeout = IDLE_TIMEOUT
         msg.hard_timeout = IDLE_TIMEOUT
         msg.data = event.ofp
-        # Packets coming from the client
         msg.match.in_port = event.port
-        # Rule only for IP packets (service)
         msg.match.dl_type = ethernet.IP_TYPE
-        # Ethernet src address matching the MAC of the client
         msg.match.dl_src = frame.src
-        # Ethernet dst address matching the MAC of the proxy
-        msg.match.dl_dst = LOAD_BALANCER_MAC
-        # Network src address matching the IP of the client
+        msg.match.dl_dst = NET_PROXY_MAC
         msg.match.nw_src = packet.srcip
-        # Network dst address matching the IP of the proxy
-        msg.match.nw_dst = LOAD_BALANCER_IP
+        msg.match.nw_dst = NET_PROXY_IP
 
-        # - Update the src IP and MAC to the chosen server
+        # Update Selected Server IP & MAC
         msg.actions.append(of.ofp_action_dl_addr.set_dst(server.mac))
         msg.actions.append(of.ofp_action_nw_addr.set_dst(server.ip))
-        # - Forward to the chosen server
         msg.actions.append(of.ofp_action_output(port=server.port))
-        # Send OF msg to update flow rules
-        log.debug("Sending OFP FlowMod Client -> Server path" % ())
+        log.debug("Sending request Client to Server ")
         self.connection.send(msg)
 
-"""
-Controller
-"""
-class load_balancer (object):
+""" Controller """
+class load_balancer(object):
     def __init__(self):
-        # Add listeners
         core.openflow.addListeners(self)
 
+    """ New connection from switch """
     def _handle_ConnectionUp(self, event):
         log.debug("Switch connected" % ())
         # Create load balancer
-        balancer(event.connection)
+        proxy_controller(event.connection)
 
-def launch ():
-	core.registerNew(load_balancer)
+def launch():
+    core.registerNew(load_balancer)
+
